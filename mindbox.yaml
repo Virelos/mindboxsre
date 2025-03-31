@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-app
+  labels:
+    app: web-app
+spec:
+  replicas: 4  # По нагрузочному тесту 4 пода справляются с пиковой нагрузкой
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1  # Позволяет постепенно обновлять поды, не создавая сразу много новых
+      maxUnavailable: 1  # Гарантирует, что всегда будет доступно не менее 3 подов во время обновления
+  selector:
+    matchLabels:
+      app: web-app
+  template:
+    metadata:
+      labels:
+        app: web-app
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - web-app
+              topologyKey: "kubernetes.io/hostname"
+        # Распределяем поды по зонам для отказоустойчивости
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 1
+            preference:
+              matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                - zone-a
+                - zone-b
+                - zone-c
+      containers:
+      - name: web-app
+        image: your-web-app-image:latest
+        resources:
+          requests:
+            memory: "128Mi"  # Ровное потребление памяти
+            cpu: "0.1"       # Базовая потребность в CPU
+          limits:
+            memory: "256Mi"  # Даем небольшой запас по памяти
+            cpu: "1"         # Лимит выше для обработки первых запросов
+        readinessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 6  # Даем время на инициализацию (5-10 сек)
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 8080
+          initialDelaySeconds: 10  # Больше времени на первую проверку
+          periodSeconds: 10
+      terminationGracePeriodSeconds: 30  # Достаточно для graceful shutdown
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-app-service
+spec:
+  selector:
+    app: web-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: web-app-hpa
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: web-app
+  minReplicas: 2  # Минимум 2 пода для отказоустойчивости ночью
+  maxReplicas: 4  # Максимум 4 пода по результатам нагрузочного теста
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60  # Средняя утилизация CPU
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300  # Задержка перед уменьшением реплик
+      policies:
+      - type: Percent
+        value: 50  # Максимально уменьшаем на 50% за раз
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60  # Быстрее масштабируемся вверх
+      policies:
+      - type: Percent
+        value: 100  # Можем удвоить количество подов за раз при необходимости
+        periodSeconds: 15
